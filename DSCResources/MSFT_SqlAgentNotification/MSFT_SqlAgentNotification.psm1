@@ -22,6 +22,9 @@ $script:localizedData = Get-LocalizedData -ResourceName 'MSFT_SqlAgentNotificati
     .PARAMETER InstanceName
     The name of the SQL instance to be configured.
 
+    .PARAMETER NotificationType
+    The type of SQL Agent Alert notification for the SQL Agent Operator.
+
 #>
 function Get-TargetResource
 {
@@ -47,7 +50,11 @@ function Get-TargetResource
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
         [System.String]
-        $InstanceName
+        $InstanceName,
+
+        [Parameter(Mandatory = $true)]
+        [System.String[]]
+        $NotificationType
 
     )
 
@@ -57,7 +64,7 @@ function Get-TargetResource
         Ensure            = 'Absent'
         ServerName        = $ServerName
         InstanceName      = $InstanceName
-        NotificationType  = $null
+        NotificationType  = $NotificationType
     }
 
     $sqlServerObject = Connect-SQL -ServerName $ServerName -InstanceName $InstanceName
@@ -68,6 +75,24 @@ function Get-TargetResource
             $script:localizedData.GetSqlOpAlerts
         )
 
+        # Check alert exists
+        $sqlAlertObject = $sqlServerObject.JobServer.Alerts | Where-Object {$_.Name -eq $Alert}
+        if ($sqlAlertObject)
+        {
+            Write-Verbose -Message (
+            $script:localizedData.SqlAgentOpAlertPresent `
+                -f $Alert
+            )
+            $returnValue['Alert'] = $sqlAlertObject.Name
+        }
+        else
+        {
+            Write-Verbose -Message (
+                $script:localizedData.SqlAgentOpAlertAbsent `
+                    -f $Alert, $Operator
+            )
+        }
+
         # Check operator exists
         $sqlOperatorObject = $sqlServerObject.JobServer.Operators | Where-Object {$_.Name -eq $Operator}
         if ($sqlOperatorObject)
@@ -76,19 +101,12 @@ function Get-TargetResource
                 $script:localizedData.SqlAgentOpPresent `
                     -f $Operator
             )
-
-            # Check alert exists
+            $returnValue['Operator'] = $sqlOperatorObject.Name
             $sqlOperatorAlertObject = $sqlOperatorObject.EnumNotifications() | Where-Object {$_.AlertName -eq $Alert}
+
             if ($sqlOperatorAlertObject)
             {
-                Write-Verbose -Message (
-                $script:localizedData.SqlAgentOpAlertPresent `
-                    -f $Alert, $Operator
-                )
-
                 $returnValue['Ensure'] = 'Present'
-                $returnValue['Operator'] = $sqlOperatorObject.Name
-                $returnValue['Alert'] = $sqlAgentAlert.Name
 
                 $notificationTypes = @()
                 if ($sqlOperatorAlertObject.UseEmail)
@@ -99,14 +117,11 @@ function Get-TargetResource
                 {
                     $notificationTypes += 'Pager'
                 }
-                $returnValue['NotificationType'] = $notificationTypes
-            }
-            else
-            {
-                Write-Verbose -Message (
-                    $script:localizedData.SqlAgentOpAlertAbsent `
-                        -f $Alert
-                )
+
+                if ($notificationTypes)
+                {
+                    $returnValue['NotificationType'] = $notificationTypes
+                }
             }
         }
         else
@@ -131,7 +146,7 @@ function Get-TargetResource
     This function sets the SQL Agent Operator.
 
     .PARAMETER Ensure
-    Specifies if the SQL Agent Operator should be present or absent. Default is Present
+    Specifies if the SQL Agent Operator Alert notification should be present or absent. Default is Present
 
     .PARAMETER Operator
     The name of the SQL Agent Operator.
@@ -148,7 +163,7 @@ function Get-TargetResource
     .PARAMETER NotificationType
     The type of SQL Agent Alert notification for the SQL Agent Operator.
 #>
-function Set-TargetResource
+    function Set-TargetResource
 {
     [CmdletBinding()]
     param
@@ -178,8 +193,8 @@ function Set-TargetResource
         [System.String]
         $InstanceName,
 
-        [Parameter()]
-        [System.String]
+        [Parameter(Mandatory = $true)]
+        [System.String[]]
         $NotificationType
     )
 
@@ -187,103 +202,107 @@ function Set-TargetResource
 
     if ($sqlServerObject)
     {
-        switch ($Ensure)
+        $sqlOperatorObject = $sqlServerObject.JobServer.Operators | Where-Object {$_.Name -eq $Operator}
+        $sqlAgentAlertObject = $sqlServerObject.JobServer.Alerts | Where-Object {$_.Name -eq $Alert}
+        if ($sqlOperatorObject -and $sqlAgentAlertObject)
         {
-            'Present'
+            switch ($Ensure)
             {
-                $sqlOperatorObject = $sqlServerObject.JobServer.Operators | Where-Object {$_.Name -eq $Operator}
-                $sqlAgentAlertObject = $sqlServerObject.JobServer.Alerts | Where-Object {$_.Name -eq $Alert}
-                if ($sqlOperatorObject -and $sqlAgentAlertObject)
-                {
-                    if ($PSBoundParameters.ContainsKey('NotificationType'))
-                    {
-                        try
-                        {
-                            Write-Verbose -Message (
-                                $script:localizedData.UpdateNotificationType `
-                                    -f $Operator, ($NotificationType -join ', ')
-                            )
-
-                            $NotifyMethod = 0
-                            if ($NotificationType -contains 'Email')
-                            {
-                                $NotifyMethod += 1
-                            }
-                            if ($NotificationType -contains 'Pager')
-                            {
-                                $NotifyMethod += 3
-                            }
-
-                            $sqlAgentOpAlerts = $sqlOperatorObject.EnumNotifications() | Where-Object {$_.AlertName -eq $Alert}
-                            if ($sqlAgentOpAlerts)
-                            {
-                                # check type and update if needed
-
-                            }
-                            else
-                            {
-                                # no current alert so just update
-                                $SqlOperatorObject.AddNotification($sqlAgentAlertObject.Name, $NotifyMethod)
-                            }
-                        }
-                        catch
-                        {
-                            $errorMessage = $script:localizedData.UpdateOperatorAlertSetError -f $Alert, $Operator, $ServerName, $InstanceName
-                            New-InvalidOperationException -Message $errorMessage -ErrorRecord $_
-                        }
-                    }
-                }
-                else
+                'Present'
                 {
                     try
                     {
-                        $sqlOperatorObjectToCreate = New-Object -TypeName Microsoft.SqlServer.Management.Smo.Agent.Operator -ArgumentList $sqlServerObject.JobServer, $Name
-
-                        if ($sqlOperatorObjectToCreate)
+                        $NotifyMethod = 0
+                        if ($NotificationType -contains 'Email')
                         {
-                            Write-Verbose -Message (
-                                $script:localizedData.AddSqlAgentOperator `
-                                    -f $Name
-                            )
-                            if ($PSBoundParameters.ContainsKey('EmailAddress'))
+                            $NotifyMethod += 1
+                        }
+                        if ($NotificationType -contains 'Pager')
+                        {
+                            $NotifyMethod += 2
+                        }
+
+                        $sqlAgentOpAlerts = $sqlOperatorObject.EnumNotifications() | Where-Object {$_.AlertName -eq $Alert}
+                        if ($sqlAgentOpAlerts)
+                        {
+                            # check type and update if needed
+                            $NotifyCheck = 0
+                            if ($sqlAgentOpAlerts.HasEmail)
+                            {
+                                $NotifyCheck += 1
+                            }
+                            if ($sqlAgentOpAlerts.HasPager)
+                            {
+                                $NotifyCheck += 2
+                            }
+                            if ($NotifyMethod -ne $NotifyCheck)
                             {
                                 Write-Verbose -Message (
-                                    $script:localizedData.UpdateEmailAddress `
-                                        -f $EmailAddress, $Name
+                                $script:localizedData.UpdateNotificationType `
+                                    -f $Operator, ($NotificationType -join ', ')
                                 )
-                                $sqlOperatorObjectToCreate.EmailAddress = $EmailAddress
+
+                                $SqlOperatorObject.UpdateNotification($sqlAgentAlertObject.Name, $NotifyMethod)
                             }
-                            $sqlOperatorObjectToCreate.Create()
+                        }
+                        else
+                        {
+                            Write-Verbose -Message (
+                            $script:localizedData.AddNotificationType `
+                                -f $Operator, ($NotificationType -join ', ')
+                            )
+
+                            $SqlOperatorObject.AddNotification($sqlAgentAlertObject.Name, $NotifyMethod)
                         }
                     }
                     catch
                     {
-                        $errorMessage = $script:localizedData.CreateOperatorSetError -f $Name, $ServerName, $InstanceName
+                        $errorMessage = $script:localizedData.UpdateOperatorAlertSetError -f $Alert, $Operator, $ServerName, $InstanceName
+                        New-InvalidOperationException -Message $errorMessage -ErrorRecord $_
+                    }
+                }
+                'Absent'
+                {
+                    try
+                    {
+                        $sqlAgentOpAlerts = $sqlOperatorObject.EnumNotifications() | Where-Object {$_.AlertName -eq $Alert}
+                        if ($sqlAgentOpAlerts)
+                        {
+                            Write-Verbose -Message (
+                                $script:localizedData.RemoveOpAlertNotification `
+                                    -f $Operator, $Alert, $ServerName, $InstanceName
+                            )
+                            $SqlOperatorObject.RemoveNotification($sqlAgentAlertObject.Name)
+                        }
+                    }
+                    catch
+                    {
+                        $errorMessage = $script:localizedData.RemoveOpAlertError -f $Name, $ServerName, $InstanceName
                         New-InvalidOperationException -Message $errorMessage -ErrorRecord $_
                     }
                 }
             }
-
-            'Absent'
+        }
+        else
+        {
+            try
             {
-                try
+                if (!$sqlOperatorObject)
                 {
-                    $sqlOperatorObjectToDrop = $sqlServerObject.JobServer.Operators | Where-Object {$_.Name -eq $Name}
-                    if ($sqlOperatorObjectToDrop)
-                    {
-                        Write-Verbose -Message (
-                            $script:localizedData.DeleteSqlAgentOperator `
-                                -f $Name
-                        )
-                        $sqlOperatorObjectToDrop.Drop()
-                    }
+                    $errorMessage = $script:localizedData.OperatorDoesNotExist -f $Operator, $ServerName, $InstanceName
+                    New-InvalidOperationException -Message $errorMessage -ErrorRecord $_
                 }
-                catch
+                if (!$sqlAgentAlertObject)
                 {
-                    $errorMessage = $script:localizedData.DropOperatorSetError -f $Name, $ServerName, $InstanceName
+                    $errorMessage = $script:localizedData.AlertDoesNotExist -f $Alert, $ServerName, $InstanceName
                     New-InvalidOperationException -Message $errorMessage -ErrorRecord $_
                 }
             }
+            catch
+                {
+                    $errorMessage = $script:localizedData.CheckExistenceError -f $Alert, $Operator, $ServerName, $InstanceName
+                    New-InvalidOperationException -Message $errorMessage -ErrorRecord $_
+                }
         }
     }
     else
@@ -298,10 +317,13 @@ function Set-TargetResource
     This function tests the SQL Agent Operator.
 
     .PARAMETER Ensure
-    Specifies if the SQL Agent Operator should be present or absent. Default is Present
+    Specifies if the SQL Agent Operator Alert notification should be present or absent. Default is Present
 
-    .PARAMETER Name
+    .PARAMETER Operator
     The name of the SQL Agent Operator.
+
+    .PARAMETER Alert
+    The name of the SQL Agent Alert.
 
     .PARAMETER ServerName
     The host name of the SQL Server to be configured. Default is $env:COMPUTERNAME.
@@ -309,8 +331,8 @@ function Set-TargetResource
     .PARAMETER InstanceName
     The name of the SQL instance to be configured.
 
-    .PARAMETER EmailAddress
-    The email address to be used for the SQL Agent Operator.
+    .PARAMETER NotificationType
+    The type of SQL Agent Alert notification for the SQL Agent Operator.
 #>
 function Test-TargetResource
 {
@@ -327,7 +349,11 @@ function Test-TargetResource
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
         [System.String]
-        $Name,
+        $Operator,
+
+        [Parameter(Mandatory = $true)]
+        [System.String]
+        $Alert,
 
         [Parameter()]
         [System.String]
@@ -339,17 +365,18 @@ function Test-TargetResource
         $InstanceName,
 
         [Parameter()]
-        [System.String]
-        $EmailAddress
+        [System.String[]]
+        $NotificationType
     )
 
     Write-Verbose -Message (
-        $script:localizedData.TestSqlAgentOperator `
-            -f $Name
+        $script:localizedData.TestSqlAgentOpAlert `
+            -f $Alert, $Operator
     )
 
     $getTargetResourceParameters = @{
-        Name           = $Name
+        Operator       = $Operator
+        Alert          = $Alert
         ServerName     = $ServerName
         InstanceName   = $InstanceName
     }
@@ -364,8 +391,8 @@ function Test-TargetResource
             if ($getTargetResourceResult.Ensure -ne 'Absent')
             {
                 Write-Verbose -Message (
-                    $script:localizedData.SqlAgentOperatorExistsButShouldNot `
-                        -f $Name
+                    $script:localizedData.SqlAgentOpAlertExistsButShouldNot `
+                        -f ($NotificationType -join ', ')
                 )
                 $isOperatorInDesiredState = $false
             }
@@ -373,25 +400,102 @@ function Test-TargetResource
 
         'Present'
         {
-            if ($getTargetResourceResult.EmailAddress -ne $EmailAddress -and $PSBoundParameters.ContainsKey('EmailAddress'))
+            if ($getTargetResourceResult.Operator -and $getTargetResourceResult.Alert)
             {
-                Write-Verbose -Message (
-                    $script:localizedData.SqlAgentOperatorExistsButEmailWrong `
-                        -f $Name, $getTargetResourceResult.EmailAddress, $EmailAddress
-                )
-                $isOperatorInDesiredState = $false
+                if ($getTargetResourceResult.NotificationType)
+                {
+                    if ((Compare-Object -ReferenceObject $getTargetResourceResult.NotificationType -DifferenceObject $NotificationType))
+                    {
+                        Write-Verbose -Message (
+                            $script:localizedData.SqlAgentOpAlertExistsButNotificationWrong `
+                                -f ($getTargetResourceResult.NotificationType -join ','), ($NotificationType -join ', ')
+                        )
+                        $isOperatorInDesiredState = $false
+                    }
+                    elseif ($getTargetResourceResult.Ensure -ne 'Present')
+                    {
+                        Write-Verbose -Message (
+                            $script:localizedData.SqlAgentOpAlertDoesNotExistButShould `
+                                -f $Operator, $Alert
+                        )
+                        $isOperatorInDesiredState = $false
+                    }
+                }
+                else {
+                    Write-Verbose -Message (
+                        $script:localizedData.SqlAgentOpAlertExistsButNotificationWrong `
+                            -f ($getTargetResourceResult.NotificationType -join ','), ($NotificationType -join ', ')
+                    )
+                    $isOperatorInDesiredState = $false
+                }
             }
-            elseif ($getTargetResourceResult.Ensure -ne 'Present')
+            else
             {
-                Write-Verbose -Message (
-                    $script:localizedData.SqlAgentOperatorDoesNotExistButShould `
-                        -f $Name
-                )
-                $isOperatorInDesiredState = $false
+                $MissingObject = @()
+                if(!$getTargetResourceResult.Operator)
+                {
+                    $MissingObject += "Operator ($Operator)"
+                }
+                if(!$getTargetResourceResult.Alert)
+                {
+                    $MissingObject += "Alert ($Alert)"
+                }
+                $errorMessage = $script:localizedData.MissingObject -f ($MissingObject -join ', '), $ServerName, $InstanceName
+                New-InvalidOperationException -Message $errorMessage
             }
         }
     }
     $isOperatorInDesiredState
 }
 
+function Test-NotificationType
+{
+    param (
+        [Parameter()]
+        $sqlOperatorAlertObject,
+
+        [Parameter()]
+        [System.String[]]
+        $NotificationType
+        )
+
+        $returnValue = @{
+            Ensure            = 'Absent'
+            CurrentNotificationType  = $null
+            DesiredNotificationType  = $NotificationType
+        }
+
+        $NotifyMethod = 0
+        if ($NotificationType -contains 'Email')
+        {
+            $NotifyMethod += 1
+        }
+        if ($NotificationType -contains 'Pager')
+        {
+            $NotifyMethod += 2
+        }
+
+        if ($sqlOperatorAlertObject)
+        {
+            # check type and update if needed
+            $NotifyCheck = 0
+            if ($sqlOperatorAlertObject.HasEmail)
+            {
+                $NotifyCheck += 1
+            }
+            if ($sqlOperatorAlertObject.HasPager)
+            {
+                $NotifyCheck += 2
+            }
+            if ($NotifyMethod -ne $NotifyCheck)
+            {
+                return $false
+            }
+
+
+        return $sqlOperatorAlertObject
+
+}
+
 Export-ModuleMember -Function *-TargetResource
+Export-ModuleMember -Function Test-NotificationType
